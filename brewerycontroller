@@ -1,0 +1,576 @@
+#include <LiquidCrystal.h>
+
+#include <OneWire.h> // Library for Temp sensor
+#include <DallasTemperature.h> // Library for Temp conversion
+
+#define ONE_WIRE_BUS A0
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+DeviceAddress tempDeviceAddress;
+
+int  resolution = 12;
+unsigned long lastTempRequest = 0;
+int  delayInMillis = 0;
+float Temperature = 0.0;
+int  idle = 0;
+
+LiquidCrystal lcd(9, 8, 7, 6, 5, 4);
+
+const int LED_RED = 10; //Red LED
+const int LED_GREEN = 11; //Green LED
+const int RELAY = 13; //Relay
+
+static int pinA = 3; // Our first hardware interrupt pin is digital pin 2
+static int pinB = 2; // Our second hardware interrupt pin is digital pin 3
+volatile byte aFlag = 0; // let's us know when we're expecting a rising edge on pinA to signal that the encoder has arrived at a detent
+volatile byte bFlag = 0; // let's us know when we're expecting a rising edge on pinB to signal that the encoder has arrived at a detent (opposite direction to when aFlag is set)
+volatile byte encoderPos = 0; //this variable stores our current value of encoder position. Change to int or uin16_t instead of byte if you want to record a larger range than 0-255
+volatile byte oldEncPos = 0; //stores the last encoder position value so we can compare to the current reading and see if it has changed (so we know when to print to the serial monitor)
+volatile byte reading = 0; //somewhere to store the direct values we read from our interrupt pins before checking to see if we have moved a whole detent
+
+const int selectSwitch = 12;
+unsigned int mashSet = 60;
+unsigned int mashTemp;
+unsigned int timeSet = 60;
+unsigned int mashTime;
+unsigned int boilTime;
+int seconds = 59;
+int secondsCount;
+unsigned long time_countdown = 0;
+int menuValue = 0;
+
+
+void setup() {
+
+  sensors.begin();
+  sensors.getAddress(tempDeviceAddress, 0);
+  sensors.setResolution(tempDeviceAddress, resolution);
+
+  sensors.setWaitForConversion(false);
+  sensors.requestTemperatures();
+  delayInMillis = 750 / (1 << (12 - resolution));
+  lastTempRequest = millis();
+
+  pinMode(LED_RED, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(RELAY, OUTPUT);
+  pinMode(selectSwitch, INPUT);
+  pinMode(pinA, INPUT_PULLUP); // set pinA as an input, pulled HIGH to the logic voltage (5V or 3.3V for most cases)
+  pinMode(pinB, INPUT_PULLUP); // set pinB as an input, pulled HIGH to the logic voltage (5V or 3.3V for most cases)
+  attachInterrupt(0, PinA, RISING); // set an interrupt on PinA, looking for a rising edge signal and executing the "PinA" Interrupt Service Routine (below)
+  attachInterrupt(1, PinB, RISING); // set an interrupt on PinB, looking for a rising edge signal and executing the "PinB" Interrupt Service Routine (below)
+  Serial.begin(115200);
+
+  digitalWrite (selectSwitch, HIGH);
+
+  lcd.begin(16, 2);
+
+  digitalWrite(LED_GREEN, HIGH); //Green LED ON
+  digitalWrite(LED_RED, LOW);    //Red LED OFF
+  digitalWrite(RELAY, LOW);      //Turn off Relay
+
+  lcd.setCursor (3, 0);
+  lcd.print("Welcome To");
+  lcd.setCursor (3, 1);
+  lcd.print("BEERduino!");
+
+  delay(2500);
+  lcd.clear();
+}
+void PinA() {
+  cli(); //stop interrupts happening before we read pin values
+  reading = PIND & 0xC; // read all eight pin values then strip away all but pinA and pinB's values
+  if (reading == B00001100 && aFlag) { //check that we have both pins at detent (HIGH) and that we are expecting detent on this pin's rising edge
+    encoderPos ++; //decrement the encoder's position count
+    bFlag = 0; //reset flags for the next turn
+    aFlag = 0; //reset flags for the next turn
+  }
+  else if (reading == B00000100) bFlag = 1; //signal that we're expecting pinB to signal the transition to detent from free rotation
+  sei(); //restart interrupts
+}
+void PinB() {
+  cli(); //stop interrupts happening before we read pin values
+  reading = PIND & 0xC; //read all eight pin values then strip away all but pinA and pinB's values
+  if (reading == B00001100 && bFlag) { //check that we have both pins at detent (HIGH) and that we are expecting detent on this pin's rising edge
+    encoderPos --; //increment the encoder's position count
+    bFlag = 0; //reset flags for the next turn
+    aFlag = 0; //reset flags for the next turn
+  }
+  else if (reading == B00001000) aFlag = 1; //signal that we're expecting pinA to signal the transition to detent from free rotation
+  sei(); //restart interrupts
+}
+
+void loop() {
+
+  //============================================================================================//
+  //                Get user input for mash temp setpoint                                       //
+  //============================================================================================//
+
+  encoderPos = 60;
+  while (menuValue == 0)
+  {
+    //Display Mash Set point on LCD
+
+    lcd.setCursor(1, 0);
+    lcd.print("Set Mash Temp:");
+    lcd.setCursor(6, 1);
+    lcd.print(encoderPos);
+    lcd.print(" C");
+
+    if (digitalRead(selectSwitch) == LOW)
+    {
+      mashTemp = encoderPos;
+      menuValue++;
+      lcd.clear();
+    }
+    delay (1);
+  }
+  if (menuValue == 1)
+  {
+    delay (500);
+  }
+
+  //============================================================================================//
+  //                Get user input for mash time setpoint                                       //
+  //============================================================================================//
+
+  encoderPos = 60;
+  while (menuValue == 1)
+  {
+
+    //Display Mash Time Set point on LCD
+
+    lcd.setCursor(1, 0);
+    lcd.print("Set Mash Time:");
+    lcd.setCursor(4, 1);
+    lcd.print(encoderPos);
+    lcd.print(" Mins");
+
+    if (digitalRead(selectSwitch) == LOW)
+    {
+      mashTime = encoderPos;
+      menuValue ++;
+      lcd.clear();
+    }
+    delay(1);
+    if (menuValue == 2)
+    {
+      delay (500);
+    }
+  }
+
+
+  //============================================================================================//
+  //          Display user selected set points before starting for user to confirm              //
+  //============================================================================================//
+
+  while (menuValue == 2)
+  {
+    //Display Set Mash Time and Set Mash Temp point on LCD
+    lcd.setCursor(0, 0);
+    lcd.print("Temp:");
+    lcd.print(mashTemp);
+    lcd.print(" Time:");
+    lcd.print(mashTime);
+    lcd.setCursor(1, 1);
+    lcd.print("PRESS TO START");
+
+    if (digitalRead(selectSwitch) == LOW)
+    {
+      menuValue ++;
+      lcd.clear();
+    }
+    delay(100);
+  }
+  while (menuValue == 3)
+  {
+    delay (500);
+    menuValue ++;
+  }
+
+  //============================================================================================//
+  //                Heating up to temp for mash. User to confirm once ready                     //
+  //============================================================================================//
+
+  while (menuValue == 4)
+  {
+    lcd.setCursor(1, 0);
+    lcd.print("Mash Temp: ");
+    lcd.print(Temperature);
+    lcd.setCursor(3, 1);
+    lcd.print("HEATING UP");
+
+    if (millis() - lastTempRequest >= delayInMillis) // waited long enough??
+    {
+
+      Temperature = sensors.getTempCByIndex(0);
+      idle = 0;
+
+      // immediately after fetching the temperature we request a new sample
+      // in the async modus
+      // for the demo we let the resolution change to show differences
+      resolution++;
+      if (resolution > 12) resolution = 9;
+
+      sensors.setResolution(tempDeviceAddress, resolution);
+      sensors.requestTemperatures();
+      delayInMillis = 750 / (1 << (12 - resolution));
+      lastTempRequest = millis();
+    }
+    if (Temperature > mashTemp)
+    {
+      digitalWrite(RELAY, LOW);   //Turn off heater
+      digitalWrite(LED_RED, LOW);
+      digitalWrite(LED_GREEN, HIGH); //Turn on Green LED
+      for (int i = 0; i < 5; i++) {
+        tone (A1, 500);
+        delay (500);
+        noTone (A1);
+        delay (500);
+
+      }
+      menuValue ++;
+
+    }
+    if (Temperature < mashTemp)
+    {
+      digitalWrite(RELAY, HIGH);   //Turn on heater
+      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, HIGH); //Turn on RED LED
+    }
+  }
+  lcd.clear();
+  delay (500);
+
+  while (menuValue == 5) {
+
+    lcd.setCursor(0, 0);
+    lcd.print("Temp Reached: ");
+    lcd.print(Temperature);
+    lcd.setCursor(1, 1);
+    lcd.print("PRESS TO START");
+
+    if (digitalRead(selectSwitch) == LOW)
+    {
+      menuValue ++;
+    }
+
+
+  }
+  delay(500);
+
+  //-------------------------- MASH PROCESS ----------------------------------------------------//
+
+  //============================================================================================//
+  //               Mash timer countdown                                                         //
+  //============================================================================================//
+
+  time_countdown = millis();
+  int minsCount = mashTime;
+  mashTime = mashTime - 1;
+
+  while (minsCount > 0 && seconds >= 0 && menuValue == 6)
+  {
+    //Display Mash Temp and Time on LCD
+    lcd.setCursor(0, 0);
+    lcd.print("Mash Temp: ");
+    lcd.print(Temperature);
+    lcd.setCursor(0, 1);
+    lcd.print("Mash Time: ");
+    if (mashTime < 10) {
+      lcd.print ("0");
+      lcd.print (mashTime);
+    } else {
+      lcd.print(mashTime);
+    }
+    lcd.print(":");
+    if (seconds < 10) {
+      lcd.print ("0");
+      lcd.print (seconds);
+    } else {
+      lcd.print (seconds);
+    }
+
+
+    if (millis() - time_countdown >= 999) { //The while loop ends when 'minsCount' become zero
+      seconds = seconds - 1;
+      secondsCount ++;
+      if (secondsCount == 60) {
+        mashTime = mashTime - 1;
+        secondsCount = 0;
+        seconds = 59;
+        minsCount = minsCount - 1;
+      }
+      time_countdown = millis();
+    }
+
+
+    //============================================================================================//
+    //                Reading temp and cotrolling heater                                          //
+    //============================================================================================//
+
+    if (millis() - lastTempRequest >= delayInMillis) // waited long enough??
+    {
+
+      Temperature = sensors.getTempCByIndex(0);
+      idle = 0;
+
+      // immediately after fetching the temperature we request a new sample
+      // in the async modus
+      // for the demo we let the resolution change to show differences
+      resolution++;
+      if (resolution > 12) resolution = 9;
+
+      sensors.setResolution(tempDeviceAddress, resolution);
+      sensors.requestTemperatures();
+      delayInMillis = 750 / (1 << (12 - resolution));
+      lastTempRequest = millis();
+    }
+
+    if (Temperature > mashTemp)
+    {
+      digitalWrite(RELAY, LOW);   //Turn off heater
+      digitalWrite(LED_RED, LOW);
+      digitalWrite(LED_GREEN, HIGH); //Turn on Green LED
+    }
+    else
+    {
+      digitalWrite(RELAY, HIGH);   //Turn on heater
+      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, HIGH); //Turn on RED LED
+    }
+
+    //delay(100); //Update at every 100mSeconds
+  }
+
+
+  //============================================================================================//
+  //               Mash finished. User has option to continue to boil                           //
+  //============================================================================================//
+
+  menuValue++;
+  while (menuValue == 7) {
+    digitalWrite(RELAY, LOW);   //Turn off heater
+    digitalWrite(LED_RED, LOW);
+    digitalWrite(LED_GREEN, HIGH); //Turn on Green LED
+    lcd.clear();
+    lcd.setCursor(1, 0);
+    lcd.print("Finished Mash");
+    for (int i = 0; i < 5; i++) {
+      tone (A1, 500);
+      delay (500);
+      noTone (A1);
+      delay (500);
+    }
+    menuValue++;
+  }
+  while (menuValue == 8) {
+    lcd.setCursor (1, 1);
+    lcd.print ("PRESS FOR BOIL");
+
+    if (digitalRead(selectSwitch) == LOW)
+    {
+      lcd.clear();
+      menuValue ++;
+      delay (1000);
+    }
+  }
+
+ 
+  //--------------------------------- BOIL PROCESS ---------------------------------------------//
+
+
+  //============================================================================================//
+  //                Getting user defined boil time                                              //
+  //============================================================================================//
+
+  encoderPos = 60;
+  while (menuValue == 9)  {
+
+    lcd.setCursor(3, 0);
+    lcd.print("Boil Time: ");
+    lcd.setCursor(5, 1);
+    lcd.print(encoderPos);
+    lcd.print(" Mins");
+
+    if (digitalRead(selectSwitch) == LOW)
+    {
+      boilTime = encoderPos;
+      menuValue ++;
+      lcd.clear();
+    }
+    delay(1);
+    if (menuValue == 10)
+    {
+      delay (500);
+    }
+  }
+
+  //============================================================================================//
+  //                Heating to boling point (98C). User to confirm start                        //
+  //============================================================================================//
+
+  while (menuValue == 10)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("Wort Temp: ");
+    lcd.print(Temperature);
+    lcd.setCursor(0, 1);
+    lcd.print("HEATING TO BOIL");
+
+    if (millis() - lastTempRequest >= delayInMillis) // waited long enough??
+    {
+
+      Temperature = sensors.getTempCByIndex(0);
+      idle = 0;
+
+      // immediately after fetching the temperature we request a new sample
+      // in the async modus
+      // for the demo we let the resolution change to show differences
+      resolution++;
+      if (resolution > 12) resolution = 9;
+
+      sensors.setResolution(tempDeviceAddress, resolution);
+      sensors.requestTemperatures();
+      delayInMillis = 750 / (1 << (12 - resolution));
+      lastTempRequest = millis();
+    }
+    if (Temperature > 97 )
+    {
+      for (int i = 0; i < 5; i++) {
+        tone (A1, 500);
+        delay (500);
+        noTone (A1);
+        delay (500);
+
+      }
+      menuValue ++;
+
+    }
+    if (Temperature < 100)
+    {
+      digitalWrite(RELAY, HIGH);   //Turn on heater
+      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, HIGH); //Turn on RED LED
+    }
+  }
+  lcd.clear();
+  delay (500);
+
+  while (menuValue == 11) {
+
+    lcd.setCursor(0, 0);
+    lcd.print("Temp Reached: ");
+    lcd.print(Temperature);
+    lcd.setCursor(0, 1);
+    lcd.print("PRESS TO START");
+
+    if (digitalRead(selectSwitch) == LOW)
+    {
+      menuValue ++;
+    }
+  }
+  delay(500);
+
+
+  //============================================================================================//
+  //                Boil timer countdown                                                        //
+  //============================================================================================//
+
+  time_countdown = millis();
+  int boilminsCount = boilTime;
+  boilTime = boilTime - 1;
+
+  while (boilminsCount > 0 && seconds >= 0 && menuValue == 12)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("Boil Temp: ");
+    lcd.print(Temperature);
+    lcd.setCursor(0, 1);
+    lcd.print("Boil Time: ");
+    if (boilTime < 10) {
+      lcd.print ("0");
+      lcd.print (boilTime);
+    } else {
+      lcd.print(boilTime);
+    }
+    lcd.print(":");
+    if (seconds < 10) {
+      lcd.print ("0");
+      lcd.print (seconds);
+    } else {
+      lcd.print (seconds);
+    }
+
+
+    if (millis() - time_countdown >= 999) { //The while loop ends when 'minsCount' become zero
+      seconds = seconds - 1;
+      secondsCount ++;
+      if (secondsCount == 60) {
+        boilTime = boilTime - 1;
+        secondsCount = 0;
+        seconds = 59;
+        boilminsCount = boilminsCount - 1;
+      }
+      time_countdown = millis();
+    }
+
+    //============================================================================================//
+    //                Reading temp and controlling heater                                         //
+    //============================================================================================//
+
+    if (millis() - lastTempRequest >= delayInMillis) // waited long enough??
+    {
+
+      Temperature = sensors.getTempCByIndex(0);
+      idle = 0;
+
+      // immediately after fetching the temperature we request a new sample
+      // in the async modus
+      // for the demo we let the resolution change to show differences
+      resolution++;
+      if (resolution > 12) resolution = 9;
+
+      sensors.setResolution(tempDeviceAddress, resolution);
+      sensors.requestTemperatures();
+      delayInMillis = 750 / (1 << (12 - resolution));
+      lastTempRequest = millis();
+    }
+    if (Temperature > 100)
+    {
+      digitalWrite(RELAY, LOW);   //Turn off heater
+      digitalWrite(LED_RED, LOW);
+      digitalWrite(LED_GREEN, HIGH); //Turn on Green LED
+    }
+    else
+    {
+      digitalWrite(RELAY, HIGH);   //Turn on heater
+      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, HIGH); //Turn on RED LED
+    }
+
+    //delay(100); //Update at every 100mSeconds
+  }
+  menuValue++;
+ 
+  
+  //============================================================================================//
+  //               Boil finished                                                                //
+  //============================================================================================//
+  
+  while (menuValue == 13) {
+    digitalWrite(RELAY, LOW);   //Turn off heater
+    digitalWrite(LED_RED, LOW);
+    digitalWrite(LED_GREEN, HIGH); //Turn on Green LED
+    lcd.clear ();
+    lcd.setCursor (1, 0);
+    lcd.print ("FINISHED BOIL");
+    for (int i = 0; i < 5; i++) {
+      tone (A1, 500);
+      delay (500);
+      noTone (A1);
+      delay (500);
+    }
+  }
+}
